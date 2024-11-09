@@ -1,2 +1,1 @@
-# Gooz
-#Gooz - the featherweight shell for heavyweight tasks
+# Gooz - the featherweight shell for heavyweight tasks
