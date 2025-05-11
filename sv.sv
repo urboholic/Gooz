@@ -1,134 +1,230 @@
-`timescale 1ns/1ps
+LIBRARY IEEE;
+USE IEEE.STD_LOGIC_1164.ALL;
+USE IEEE.NUMERIC_STD.ALL;
 
-import axi_vip_pkg::*;
-import design_1_axi_vip_0_0_pkg::*;
-import axi_pkg::*;
+ENTITY apb_protocol_checker IS
+    PORT (
+        -- APB INterface
+        clk             : IN  std_logic;
+        rst_n           : IN  std_logic;
 
-module tb;
+        psel            : IN  std_logic;
+        penable         : IN  std_logic;
+        pwrite          : IN  std_logic;
+        pready          : IN  std_logic;
+        pslverr         : IN  std_logic;
+        paddr           : IN  std_logic_vector(31 DOWNTO 0);
+        pwdata          : IN  std_logic_vector(31 DOWNTO 0);
+        prdata          : IN  std_logic_vector(31 DOWNTO 0);
 
-  axi_transaction wr_txn;
-  axi_transaction rd_txn;
-  logic [31:0] rdata;
+        -- Forwarded signals (optional debug output)
+        psel_out        : OUT std_logic;
+        penable_out     : OUT std_logic;
+        pwrite_out      : OUT std_logic;
+        pready_out      : OUT  std_logic;
+        pslverr_out     : OUT  std_logic;
+        paddr_out       : OUT std_logic_vector(31 DOWNTO 0);
+        pwdata_out      : OUT std_logic_vector(31 DOWNTO 0);
+        prdata_out      : OUT  std_logic_vector(31 DOWNTO 0)
 
-  // Clock and Reset
-  logic aclk;
-  logic aresetn;
+    );
+END apb_protocol_checker;
 
-  // APB Signals
-  logic [31:0] prdata;
-  logic        pready;
-  logic        pslverr;
+ARCHITECTURE bhv OF apb_protocol_checker IS
+    TYPE state_type IS (IDLE, SETUP, ACC);
+    SIGNAL current_state : state_type := IDLE;
+BEGIN
 
-  // Simple scoreboard
-  typedef struct {
-    logic [31:0] addr;
-    logic [31:0] expected_data;
-  } scoreboard_entry_t;
+    -- Immediate signal forwardINg
+    psel_out    <= psel;
+    penable_out <= penable;
+    pwrite_out  <= pwrite;
+    pready_out  <= pready;
+    pslverr_out <= pslverr;
+    paddr_out   <= paddr;
+    pwdata_out  <= pwdata;
+    prdata_out  <= prdata;
 
-  scoreboard_entry_t scoreboard[$]; // Dynamic array
+    check_protocol_proc : PROCESS(clk, rst_n)
 
-  // Instantiate the DUT
-  design_1_wrapper DUT (
-    .aclk(aclk),
-    .aresetn(aresetn),
-    .prdata(prdata),
-    .pready(pready),
-    .pslverr(pslverr)
-  );
+      VARIABLE write_latch     : STD_LOGIC := '0';
+      VARIABLE paddr_latch     : STD_LOGIC_VECTOR(31 DOWNTO 0) := (OTHERS => '0');
+      VARIABLE pwdata_latch    : STD_LOGIC_VECTOR(31 DOWNTO 0) := (OTHERS => '0');
+      VARIABLE prdata_latch    : STD_LOGIC_VECTOR(31 DOWNTO 0) := (OTHERS => '0');
 
-  // Clock generation
-  initial begin
-    aclk = 0;
-    forever #5 aclk = ~aclk; // 100MHz
-  end
+      VARIABLE error_flag      : STD_LOGIC := '0';
+      VARIABLE using_pready    : STD_LOGIC := '0';
 
-  // Reset generation
-  initial begin
-    aresetn = 0;
-    #100;
-    aresetn = 1;
-  end
+    BEGIN
 
-  // APB Slave behavior
-  initial begin
-    pready = 1;
-    pslverr = 0;
-    prdata = 32'hDEADBEEF;
-  end
+      IF rst_n = '0' THEN
 
-  // Control tasks
-  task automatic axi_write(input [31:0] addr, input [31:0] data);
-    design_1_axi_vip_0_0_mst_t my_axi;
-    my_axi = new("AXI VIP Master", DUT.design_1_i.axi_vip_0.inst.IF);
+        current_state  <= IDLE;
+        write_latch    := '0';
+        paddr_latch    := (OTHERS => '0');
+        pwdata_latch   := (OTHERS => '0');
+        prdata_latch   := (OTHERS => '0');
+        error_flag     := '0';
+        using_pready   := '0';
 
-    wr_txn = my_axi.wr_txn();
-    wr_txn.set_addr(addr);
-    wr_txn.set_data(data);
-    wr_txn.set_prot(3'b000);
-    wr_txn.set_id(0);
-    wr_txn.set_user(0);
-    wr_txn.set_strb(4'b1111);
-    wr_txn.set_burst(BURST_FIXED);
-    wr_txn.set_size(SIZE_4BYTE);
-    wr_txn.set_len(0);
+      ELSIF RISING_EDGE(clk) THEN
+        
+        -- If pready is ever low then pready is used
+        IF pready = '0' THEN
+          
+          using_pready := '1';
+          
+        ELSE
+          NULL;
+        
+        END IF;
 
-    my_axi.send(wr_txn);
+        CASE current_state IS
 
-    $display("AXI WRITE: Addr=0x%08h Data=0x%08h", addr, data);
-  endtask
+          WHEN IDLE =>
+            
+            error_flag      := '0';
 
-  task automatic axi_read(input [31:0] addr, output [31:0] data);
-    design_1_axi_vip_0_0_mst_t my_axi;
-    my_axi = new("AXI VIP Master", DUT.design_1_i.axi_vip_0.inst.IF);
+            IF psel = '1' AND penable = '0' THEN
 
-    rd_txn = my_axi.rd_txn();
-    rd_txn.set_addr(addr);
-    rd_txn.set_prot(3'b000);
-    rd_txn.set_id(0);
-    rd_txn.set_user(0);
-    rd_txn.set_burst(BURST_FIXED);
-    rd_txn.set_size(SIZE_4BYTE);
-    rd_txn.set_len(0);
+              current_state <= SETUP;
+              write_latch    := pwrite;
+              pwdata_latch   := pwdata;
+              paddr_latch    := paddr;
+            
+            ELSE
+              NULL;
+            
+            END IF;
 
-    my_axi.send(rd_txn);
+          WHEN SETUP =>
 
-    data = rd_txn.get_data();
-    $display("AXI READ: Addr=0x%08h Data=0x%08h", addr, data);
-  endtask
+            current_state <= ACC;
 
-  // Scoreboard check
-  task automatic check_scoreboard();
-    foreach (scoreboard[i]) begin
-      logic [31:0] actual_data;
-      axi_read(scoreboard[i].addr, actual_data);
+          WHEN ACC =>
 
-      if (actual_data !== scoreboard[i].expected_data) begin
-        $error("SCOREBOARD MISMATCH: Addr=0x%08h Expected=0x%08h Got=0x%08h",
-               scoreboard[i].addr, scoreboard[i].expected_data, actual_data);
-      end else begin
-        $display("SCOREBOARD MATCH: Addr=0x%08h Data=0x%08h OK!",
-                 scoreboard[i].addr, actual_data);
-      end
-    end
-  endtask
+            IF using_pready = '1' THEN
 
-  // Main test process
-  initial begin
-    wait(aresetn == 1);
+              IF pready = '1' THEN
 
-    #100;
+                current_state  <= IDLE;
 
-    // Write and expect
-    axi_write(32'h0000_0004, 32'hCAFEBABE);
-    scoreboard.push_back('{addr: 32'h0000_0004, expected_data: 32'hDEADBEEF});
+              ELSE
+                NULL;
+                
+              END IF;
+              
+            ELSE
+            
+              IF psel = '1' AND penable = '0' THEN
+                
+                current_state  <= SETUP;
+                write_latch    := pwrite;
+                paddr_latch    := paddr;
+                pwdata_latch   := pwdata;
+                
+              ELSIF psel = '0' THEN
+                
+                current_state  <= IDLE;
+                
+              ELSE
+                NULL;
 
-    #100;
+              END IF;
 
-    // Check all expected read data
-    check_scoreboard();
+            END IF;
 
-    #100;
-    $finish;
-  end
+        END CASE;
 
-endmodule
+        -- Protocol checks
+        IF psel = '1' THEN
+          
+
+          IF current_state = IDLE AND penable = '1' THEN
+
+            error_flag  := '1';
+            ASSERT false REPORT "Penable high during idle phase" SEVERITY ERROR;
+
+          ELSE
+            NULL;
+
+          END IF;
+
+          IF current_state = SETUP AND penable = '0' THEN
+
+            error_flag  := '1';
+            ASSERT false REPORT "Penable should be high in access phase" SEVERITY ERROR;
+
+          ELSE
+            NULL;
+
+          END IF;
+
+
+          IF current_state = ACC THEN
+
+            IF write_latch /= pwrite THEN
+
+              error_flag  := '1';
+              ASSERT FALSE REPORT "Pwrite changed value during access phase" SEVERITY ERROR;
+             
+            ELSE
+              NULL;
+
+            END IF;
+
+            IF pwrite = '1' THEN 
+
+              IF pwdata_latch /= pwdata  THEN
+
+                error_flag  := '1';
+               ASSERT FALSE REPORT "Pwdata changed during access phase" SEVERITY ERROR;
+               
+              ELSE
+                NULL;
+
+              END IF;
+
+            ELSE
+              NULL;
+
+            END IF;
+
+            IF paddr_latch /= paddr THEN
+
+              error_flag  := '1';
+             ASSERT FALSE REPORT "Paddr changed during access phase" SEVERITY ERROR;
+             
+            ELSE
+              NULL;
+
+            END IF;
+
+            IF penable = '0' AND pready = '0' THEN
+
+              error_flag  := '1';
+              ASSERT FALSE REPORT "Penable changed during access phase when pready was low" SEVERITY ERROR;
+
+            ELSE
+              NULL;
+
+            END IF;
+
+          ELSE
+            NULL;
+
+          END IF;
+
+        ELSE
+          NULL;
+
+        END IF;
+
+      ELSE
+        NULL;
+
+      END IF;
+
+    END PROCESS;
+
+END bhv;
